@@ -46,6 +46,7 @@ module Faraday
           env[:parallel_manager].queue request(env)
         else
           request(env).run
+          raise_request_error(env)
         end
       end
 
@@ -82,15 +83,9 @@ module Faraday
           if resp.timed_out?
             env[:typhoeus_timed_out] = true
             env[:typhoeus_return_message] = resp.return_message
-            unless parallel?(env)
-              raise Faraday::TimeoutError, resp.return_message
-            end
           elsif resp.response_code.zero? || ((resp.return_code != :ok) && !resp.mock?)
             env[:typhoeus_connection_failed] = true
             env[:typhoeus_return_message] = resp.return_message
-            unless parallel?(env)
-              raise Faraday::ConnectionFailed, resp.return_message
-            end
           end
 
           env[:typhoeus_timings] = %i[
@@ -107,6 +102,14 @@ module Faraday
         end
 
         req
+      end
+
+      def raise_request_error(env)
+        if env[:typhoeus_timed_out]
+          raise Faraday::TimeoutError, env[:typhoeus_return_message]
+        elsif env[:typhoeus_connection_failed]
+          raise Faraday::ConnectionFailed, env[:typhoeus_return_message]
+        end
       end
 
       def typhoeus_request(env)

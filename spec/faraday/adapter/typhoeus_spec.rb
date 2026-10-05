@@ -364,4 +364,30 @@ RSpec.describe Faraday::Adapter::Typhoeus do
       end
     end
   end
+
+  context 'when a synchronous request fails' do
+    around do |example|
+      WebMock.disable!
+      example.run
+    ensure
+      WebMock.enable!
+    end
+
+    it 'releases the easy handle before raising the connection error' do
+      server = TCPServer.new('127.0.0.1', 0)
+      port = server.addr[1]
+      server.close
+      connection = Faraday.new(url: "http://127.0.0.1:#{port}") do |faraday|
+        faraday.options.open_timeout = 0.1
+        faraday.adapter :typhoeus
+      end
+      Typhoeus::Pool.clear
+
+      expect { connection.get('/') }.to raise_error(Faraday::ConnectionFailed)
+
+      expect(Typhoeus::Pool.send(:easies).size).to eq(1)
+    ensure
+      Typhoeus::Pool.clear
+    end
+  end
 end
