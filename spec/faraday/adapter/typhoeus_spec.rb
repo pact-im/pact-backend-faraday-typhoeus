@@ -390,4 +390,78 @@ RSpec.describe Faraday::Adapter::Typhoeus do
       Typhoeus::Pool.clear
     end
   end
+
+  context 'when a streaming request is interrupted' do
+    let(:server) { TCPServer.new('127.0.0.1', 0) }
+    let(:server_thread) do
+      Thread.new do
+        client = server.accept
+        client.gets("\r\n\r\n")
+        client.write("HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: keep-alive\r\n\r\n")
+        64.times do
+          client.write('x' * 16_384)
+          sleep 0.01
+        end
+      rescue Errno::EPIPE, Errno::ECONNRESET, IOError
+        nil
+      ensure
+        client&.close
+      end
+    end
+    let(:connection) do
+      server_thread
+      Faraday.new(url: "http://127.0.0.1:#{server.addr[1]}") do |faraday|
+        faraday.adapter :typhoeus
+      end
+    end
+
+    around do |example|
+      WebMock.disable!
+      example.run
+    ensure
+      WebMock.enable!
+    end
+
+    after do
+      server_thread.kill
+      server_thread.join
+      server.close unless server.closed?
+      Typhoeus::Pool.clear
+    end
+
+    it 'releases the easy handle' do
+      chunks = Enumerator.new do |yielder|
+        connection.get('/') do |request|
+          request.options.on_data = lambda do |chunk, _size|
+            yielder << chunk
+          end
+        end
+      end
+      consumer = Fiber.new do
+        chunks.each do |chunk|
+          action = Fiber.yield chunk
+          break if action == :terminate
+        end
+      end
+      Typhoeus::Pool.clear
+
+      expect(consumer.resume).not_to be_empty
+      consumer.resume(:terminate)
+
+      expect(Typhoeus::Pool.send(:easies).size).to eq(1)
+    end
+
+    it 'releases the easy handle before reraising a callback error' do
+      callback_error = StandardError.new('callback failed')
+      Typhoeus::Pool.clear
+
+      expect do
+        connection.get('/') do |request|
+          request.options.on_data = ->(*) { raise callback_error }
+        end
+      end.to raise_error(callback_error)
+
+      expect(Typhoeus::Pool.send(:easies).size).to eq(1)
+    end
+  end
 end

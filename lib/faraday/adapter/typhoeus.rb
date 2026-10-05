@@ -70,12 +70,12 @@ module Faraday
               yielded = true
               size += chunk.bytesize
 
-              env[:request][:on_data].call(chunk, size)
+              call_on_data(env, chunk, size)
             end
           end
 
           req.on_complete do |_resp|
-            env[:request][:on_data].call(+'', 0) unless yielded
+            call_on_data(env, +'', 0) unless yielded
           end
         end
 
@@ -83,7 +83,8 @@ module Faraday
           if resp.timed_out?
             env[:typhoeus_timed_out] = true
             env[:typhoeus_return_message] = resp.return_message
-          elsif resp.response_code.zero? || ((resp.return_code != :ok) && !resp.mock?)
+          elsif !env[:typhoeus_stream_interrupted] &&
+                (resp.response_code.zero? || ((resp.return_code != :ok) && !resp.mock?))
             env[:typhoeus_connection_failed] = true
             env[:typhoeus_return_message] = resp.return_message
           end
@@ -105,10 +106,35 @@ module Faraday
       end
 
       def raise_request_error(env)
-        if env[:typhoeus_timed_out]
+        if env[:typhoeus_stream_error]
+          raise env[:typhoeus_stream_error]
+        elsif env[:typhoeus_timed_out]
           raise Faraday::TimeoutError, env[:typhoeus_return_message]
         elsif env[:typhoeus_connection_failed]
           raise Faraday::ConnectionFailed, env[:typhoeus_return_message]
+        end
+      end
+
+      def call_on_data(env, chunk, size)
+        return env[:request][:on_data].call(chunk, size) if parallel?(env)
+
+        completed = false
+        failed = false
+
+        catch(:abort_streaming_callback) do
+          result = env[:request][:on_data].call(chunk, size)
+          completed = true
+          result
+        rescue StandardError => e
+          failed = true
+          env[:typhoeus_stream_error] = e
+          env[:typhoeus_stream_interrupted] = true
+          :abort
+        ensure
+          unless completed || failed
+            env[:typhoeus_stream_interrupted] = true
+            throw :abort_streaming_callback, :abort
+          end
         end
       end
 
